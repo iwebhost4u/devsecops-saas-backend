@@ -1,54 +1,63 @@
-from datetime import datetime, timedelta, UTC
-import sqlite3
-from pathlib import Path
+import os
+from datetime import datetime, UTC
 from typing import Any
 
-from fastapi import FastAPI
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from pydantic import BaseModel
-
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-DB_PATH = Path("metrics.db")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://devsecops-ai-agent-ba24eb.gitlab.io"
+    ],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 
 # -----------------------------
-# Database helpers
+# DB Connection
 # -----------------------------
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 
 def init_db():
     conn = get_conn()
+    cur = conn.cursor()
 
-    conn.execute(
-        """
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS metrics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             timestamp TEXT,
             project TEXT,
             pipeline_id TEXT,
             status TEXT,
             severity_tier TEXT,
-            high INTEGER,
-            medium INTEGER,
-            low INTEGER,
-            sbom_critical INTEGER,
-            sbom_high INTEGER,
-            sbom_medium INTEGER,
-            sbom_low INTEGER,
+            high INT,
+            medium INT,
+            low INT,
+            sbom_critical INT,
+            sbom_high INT,
+            sbom_medium INT,
+            sbom_low INT,
             anomaly TEXT,
             ticket_url TEXT,
-            sla_hours INTEGER,
+            sla_hours INT,
             sla_deadline TEXT
         )
-        """
-    )
+    """)
 
     conn.commit()
+    cur.close()
     conn.close()
 
 
@@ -58,7 +67,7 @@ def startup():
 
 
 # -----------------------------
-# Data model
+# Model
 # -----------------------------
 class Metric(BaseModel):
     project: str
@@ -72,8 +81,6 @@ class Metric(BaseModel):
     sbom_high: int = 0
     sbom_medium: int = 0
     sbom_low: int = 0
-
-    # NEW FIELDS
     anomaly: str = ""
     ticket_url: str = ""
     sla_hours: int = 0
@@ -81,88 +88,69 @@ class Metric(BaseModel):
 
 
 # -----------------------------
-# Insert metric
+# Insert
 # -----------------------------
 @app.post("/metrics")
-def submit_metrics(metric: Metric) -> dict[str, Any]:
+def submit_metrics(metric: Metric):
+    conn = get_conn()
+    cur = conn.cursor()
+
     timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    conn = get_conn()
-
-    conn.execute(
-        """
+    cur.execute("""
         INSERT INTO metrics (
             timestamp, project, pipeline_id, status, severity_tier,
             high, medium, low,
             sbom_critical, sbom_high, sbom_medium, sbom_low,
             anomaly, ticket_url, sla_hours, sla_deadline
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            timestamp,
-            metric.project,
-            metric.pipeline_id,
-            metric.status,
-            metric.severity_tier,
-            metric.high,
-            metric.medium,
-            metric.low,
-            metric.sbom_critical,
-            metric.sbom_high,
-            metric.sbom_medium,
-            metric.sbom_low,
-            metric.anomaly,
-            metric.ticket_url,
-            metric.sla_hours,
-            metric.sla_deadline,
-        ),
-    )
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (
+        timestamp,
+        metric.project,
+        metric.pipeline_id,
+        metric.status,
+        metric.severity_tier,
+        metric.high,
+        metric.medium,
+        metric.low,
+        metric.sbom_critical,
+        metric.sbom_high,
+        metric.sbom_medium,
+        metric.sbom_low,
+        metric.anomaly,
+        metric.ticket_url,
+        metric.sla_hours,
+        metric.sla_deadline
+    ))
 
     conn.commit()
-
-    total = conn.execute("SELECT COUNT(*) FROM metrics").fetchone()[0]
+    cur.close()
     conn.close()
 
-    return {"status": "stored", "total": total}
+    return {"status": "stored"}
 
 
 # -----------------------------
-# Get metrics
+# Fetch
 # -----------------------------
 @app.get("/metrics")
 def get_metrics():
     conn = get_conn()
+    cur = conn.cursor()
 
-    rows = conn.execute(
-        """
-        SELECT *
-        FROM metrics
-        ORDER BY id ASC
-        """
-    ).fetchall()
+    cur.execute("SELECT * FROM metrics ORDER BY id ASC")
+    rows = cur.fetchall()
 
+    cur.close()
     conn.close()
 
-    return [dict(row) for row in rows]
+    return rows
 
 
 # -----------------------------
-# Clear metrics (optional)
-# -----------------------------
-@app.delete("/metrics")
-def clear_metrics():
-    conn = get_conn()
-    conn.execute("DELETE FROM metrics")
-    conn.commit()
-    conn.close()
-
-    return {"status": "cleared"}
-
-
-# -----------------------------
-# Health check
+# Health
 # -----------------------------
 @app.get("/")
 def root():
-    return {"message": "DevSecOps SaaS API running"}
+    return {"message": "SaaS API running"}
